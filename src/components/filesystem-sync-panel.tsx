@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type SyncFolder = {
     id: string;
@@ -49,6 +49,24 @@ type DirectoryNode = {
     name: string;
     path: string;
     children: DirectoryNode[];
+};
+
+type SyncStatusSummary = {
+    scope: {
+        storageKey: string;
+        folderPath: string;
+    };
+    configuredFoldersTotal: number;
+    enabledFoldersTotal: number;
+    unconfiguredDirectories: number;
+    neverSyncedFolders: number;
+    needsResyncFolders: number;
+    folderErrors: Array<{
+        folderId: string;
+        storageKey: string;
+        folderPath: string;
+        error: string;
+    }>;
 };
 
 type SyncFolderTreeNode = {
@@ -608,6 +626,10 @@ export function FilesystemSyncPanel() {
     const [addingPath, setAddingPath] = useState<string | null>(null);
     const [message, setMessage] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [statusLoading, setStatusLoading] = useState(false);
+    const [statusError, setStatusError] = useState<string | null>(null);
+    const [statusSummary, setStatusSummary] = useState<SyncStatusSummary | null>(null);
+    const statusReqIdRef = useRef(0);
 
     async function loadFolders() {
         setLoading(true);
@@ -631,6 +653,43 @@ export function FilesystemSyncPanel() {
     useEffect(() => {
         void loadFolders();
     }, []);
+
+    async function loadSyncStatus(nextStorageKey = storageKey, nextFolderPath = folderPath) {
+        const reqId = ++statusReqIdRef.current;
+        setStatusLoading(true);
+        setStatusError(null);
+
+        try {
+            const params = new URLSearchParams({
+                storageKey: nextStorageKey.trim() || 'main',
+                folderPath: nextFolderPath || ''
+            });
+
+            const response = await fetch(`/api/sync-folders/status?${params.toString()}`);
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.details ?? data.error ?? 'Failed to load sync status');
+            }
+
+            // prevent stale responses from overwriting newer selection
+            if (reqId !== statusReqIdRef.current) return;
+            setStatusSummary(data.summary ?? null);
+        } catch (statusLoadError) {
+            if (reqId !== statusReqIdRef.current) return;
+            setStatusError(statusLoadError instanceof Error ? statusLoadError.message : 'Failed to load sync status');
+            setStatusSummary(null);
+        } finally {
+            if (reqId === statusReqIdRef.current) {
+                setStatusLoading(false);
+            }
+        }
+    }
+
+    useEffect(() => {
+        void loadSyncStatus(storageKey, folderPath);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [storageKey, folderPath]);
 
     const enabledCount = useMemo(() => folders.filter((folder) => folder.enabled).length, [folders]);
     const directoryTree = useMemo(() => buildDirectoryTree(availableDirectories), [availableDirectories]);
@@ -728,6 +787,7 @@ export function FilesystemSyncPanel() {
 
             setMessage(parts.join(' · '));
             await loadFolders();
+            await loadSyncStatus();
         } catch (syncError) {
             setError(syncError instanceof Error ? syncError.message : 'Filesystem sync failed');
         } finally {
@@ -765,6 +825,7 @@ export function FilesystemSyncPanel() {
             setIsDirectoryPickerOpen(false);
             setMessage(runSyncAfterAdd ? 'Sync folder added. Starting sync…' : 'Sync folder added.');
             await loadFolders();
+            await loadSyncStatus(storageKey, folderPath);
 
             if (runSyncAfterAdd && data.folder) {
                 await runFolderSync(data.folder);
@@ -804,6 +865,7 @@ export function FilesystemSyncPanel() {
             setFolders((current) =>
                 current.map((item) => (item.id === folder.id ? data.folder : item))
             );
+            await loadSyncStatus();
         } catch (toggleError) {
             setError(toggleError instanceof Error ? toggleError.message : 'Could not update sync folder');
         }
@@ -825,6 +887,7 @@ export function FilesystemSyncPanel() {
             }
 
             setFolders((current) => current.filter((folder) => folder.id !== id));
+            await loadSyncStatus();
             setMessage('Sync folder removed.');
         } catch (deleteError) {
             setError(deleteError instanceof Error ? deleteError.message : 'Could not delete sync folder');
@@ -864,7 +927,9 @@ export function FilesystemSyncPanel() {
             }
 
             setMessage(parts.join(' · '));
+
             await loadFolders();
+            await loadSyncStatus();
         } catch (syncError) {
             setError(syncError instanceof Error ? syncError.message : 'Filesystem sync failed');
         } finally {
@@ -924,10 +989,34 @@ export function FilesystemSyncPanel() {
                     <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         <div className="stack" style={{ gap: 4 }}>
                             <h3 style={{ ...sectionTitleStyle, fontSize: 16 }}>Overview</h3>
+
+
                             <span style={mutedTextStyle}>
                                 {loading ? 'Loading…' : `${folders.length} configured folder(s), ${enabledCount} enabled`}
+                                {!statusLoading && statusSummary
+                                    ? ` · ${statusSummary.unconfiguredDirectories} not yet added · ${statusSummary.neverSyncedFolders} never synced · ${statusSummary.needsResyncFolders} need re-sync`
+                                    : ''}
                             </span>
                         </div>
+
+                        {statusLoading ? (
+                            <div className="small" style={{ color: '#57606a' }}>
+                                Computing sync status…
+                            </div>
+                        ) : null}
+                        {statusError ? (
+                            <div className="small" style={{ color: '#b42318' }}>
+                                {statusError}
+                            </div>
+                        ) : null}
+                        {statusSummary && statusSummary.folderErrors.length > 0 ? (
+                            <div className="small" style={{ color: '#b42318' }}>
+                                {statusSummary.folderErrors.length} folder(s) could not be checked
+                            </div>
+                        ) : null}
+
+
+
 
                         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
                             <button
