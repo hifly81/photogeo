@@ -687,13 +687,22 @@ export function FilesystemSyncPanel() {
     }
 
     useEffect(() => {
-        void loadSyncStatus(storageKey, folderPath);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        statusReqIdRef.current += 1;
+        setStatusSummary(null);
+        setStatusError(null);
+        setStatusLoading(false);
     }, [storageKey, folderPath]);
 
     const enabledCount = useMemo(() => folders.filter((folder) => folder.enabled).length, [folders]);
     const directoryTree = useMemo(() => buildDirectoryTree(availableDirectories), [availableDirectories]);
     const configuredFoldersTree = useMemo(() => buildConfiguredFoldersTree(folders), [folders]);
+
+    function invalidateSyncStatus() {
+        statusReqIdRef.current += 1;
+        setStatusSummary(null);
+        setStatusError(null);
+        setStatusLoading(false);
+    }
 
     async function loadAvailableDirectories() {
         const trimmedStorageKey = storageKey.trim();
@@ -787,7 +796,7 @@ export function FilesystemSyncPanel() {
 
             setMessage(parts.join(' · '));
             await loadFolders();
-            await loadSyncStatus();
+            invalidateSyncStatus();
         } catch (syncError) {
             setError(syncError instanceof Error ? syncError.message : 'Filesystem sync failed');
         } finally {
@@ -795,7 +804,7 @@ export function FilesystemSyncPanel() {
         }
     }
 
-    async function addFolderFromPath(selectedFolderPath: string, runSyncAfterAdd = true) {
+    async function addFolderFromPath(selectedFolderPath: string) {
         setSaving(true);
         setError(null);
         setMessage(null);
@@ -823,13 +832,9 @@ export function FilesystemSyncPanel() {
                 current.filter((dir) => dir !== selectedFolderPath && !dir.startsWith(`${selectedFolderPath}/`))
             );
             setIsDirectoryPickerOpen(false);
-            setMessage(runSyncAfterAdd ? 'Sync folder added. Starting sync…' : 'Sync folder added.');
+            setMessage('Folder added. Run sync when you are ready to import photos.');
             await loadFolders();
-            await loadSyncStatus(storageKey, folderPath);
-
-            if (runSyncAfterAdd && data.folder) {
-                await runFolderSync(data.folder);
-            }
+            invalidateSyncStatus();
         } catch (saveError) {
             setError(saveError instanceof Error ? saveError.message : 'Could not create sync folder');
         } finally {
@@ -840,7 +845,7 @@ export function FilesystemSyncPanel() {
 
     async function addFolder(event: React.FormEvent<HTMLFormElement>) {
         event.preventDefault();
-        await addFolderFromPath(folderPath, true);
+        await addFolderFromPath(folderPath);
     }
 
     async function toggleFolder(folder: SyncFolder) {
@@ -865,7 +870,7 @@ export function FilesystemSyncPanel() {
             setFolders((current) =>
                 current.map((item) => (item.id === folder.id ? data.folder : item))
             );
-            await loadSyncStatus();
+            invalidateSyncStatus();
         } catch (toggleError) {
             setError(toggleError instanceof Error ? toggleError.message : 'Could not update sync folder');
         }
@@ -887,7 +892,7 @@ export function FilesystemSyncPanel() {
             }
 
             setFolders((current) => current.filter((folder) => folder.id !== id));
-            await loadSyncStatus();
+            invalidateSyncStatus();
             setMessage('Sync folder removed.');
         } catch (deleteError) {
             setError(deleteError instanceof Error ? deleteError.message : 'Could not delete sync folder');
@@ -929,7 +934,7 @@ export function FilesystemSyncPanel() {
             setMessage(parts.join(' · '));
 
             await loadFolders();
-            await loadSyncStatus();
+            invalidateSyncStatus();
         } catch (syncError) {
             setError(syncError instanceof Error ? syncError.message : 'Filesystem sync failed');
         } finally {
@@ -990,7 +995,6 @@ export function FilesystemSyncPanel() {
                         <div className="stack" style={{ gap: 4 }}>
                             <h3 style={{ ...sectionTitleStyle, fontSize: 16 }}>Overview</h3>
 
-
                             <span style={mutedTextStyle}>
                                 {loading ? 'Loading…' : `${folders.length} configured folder(s), ${enabledCount} enabled`}
                                 {!statusLoading && statusSummary
@@ -1015,10 +1019,17 @@ export function FilesystemSyncPanel() {
                             </div>
                         ) : null}
 
-
-
-
                         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                            <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => void loadSyncStatus()}
+                                disabled={statusLoading || syncing || saving || backfillingDeleted}
+                                title="Scan folders and compare file hashes"
+                            >
+                                {statusLoading ? 'Checking…' : 'Check changes'}
+                            </button>
+
                             <button
                                 type="button"
                                 className="secondary"
@@ -1043,7 +1054,6 @@ export function FilesystemSyncPanel() {
                             </button>
                         </div>
                     </div>
-
                 </div>
 
                 {error ? <div className="card error-banner">{error}</div> : null}
@@ -1095,7 +1105,7 @@ export function FilesystemSyncPanel() {
                             </label>
 
                             <div className="small" style={{ color: '#027a48', fontWeight: 600 }}>
-                                Tip: click directly on a folder in the tree to add it and start sync immediately.
+                                Add a folder, then use its sync button when you are ready to import photos.
                             </div>
                         </form>
 
@@ -1160,7 +1170,7 @@ export function FilesystemSyncPanel() {
                                                 onToggle={toggleExpanded}
                                                 onSelect={(path) => {
                                                     setFolderPath(path);
-                                                    void addFolderFromPath(path, true);
+                                                    void addFolderFromPath(path);
                                                 }}
                                                 addingPath={addingPath}
                                             />

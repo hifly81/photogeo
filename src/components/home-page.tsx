@@ -311,6 +311,8 @@ export function HomePage({
     const [isEditorOpen, setIsEditorOpen] = useState(false);
     const [suggestions, setSuggestions] = useState<PhotoSuggestions | null>(null);
     const [isAnalyzingPhoto, setIsAnalyzingPhoto] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [editorStatus, setEditorStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
     const [counts, setCounts] = useState({
         all: 0,
         withGeolocation: 0,
@@ -454,14 +456,6 @@ export function HomePage({
     ]);
 
     useEffect(() => {
-        if (selectedPhoto && !photos.some((photo) => photo.id === selectedPhoto.id)) {
-            setSelectedPhoto(null);
-            setIsEditorOpen(false);
-            setSuggestions(null);
-        }
-    }, [photos, selectedPhoto]);
-
-    useEffect(() => {
         setPlaceQuery(selectedPhoto?.placeName ?? selectedPhoto?.city ?? '');
     }, [selectedPhoto?.id, selectedPhoto?.placeName, selectedPhoto?.city]);
 
@@ -516,9 +510,11 @@ export function HomePage({
     }
 
     function closeEditor() {
+        if (isSaving) return;
         setIsEditorOpen(false);
         setTagName('');
         setSuggestions(null);
+        setEditorStatus(null);
     }
 
     async function analyzeSelectedPhoto() {
@@ -659,29 +655,48 @@ export function HomePage({
         if (!selectedPhoto) return;
         setError(null);
         setSuccessMessage(null);
+        setEditorStatus(null);
+        setIsSaving(true);
 
-        const response = await fetch(`/api/photos/${selectedPhoto.id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                caption: selectedPhoto.caption,
-                country: selectedPhoto.country,
-                city: selectedPhoto.city,
-                placeName: selectedPhoto.placeName,
-                latitude: selectedPhoto.latitude,
-                longitude: selectedPhoto.longitude,
-                takenAt: selectedPhoto.takenAt
-            })
-        });
+        try {
+            const response = await fetch(`/api/photos/${selectedPhoto.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    caption: selectedPhoto.caption,
+                    country: selectedPhoto.country,
+                    city: selectedPhoto.city,
+                    placeName: selectedPhoto.placeName,
+                    latitude: selectedPhoto.latitude,
+                    longitude: selectedPhoto.longitude,
+                    takenAt: selectedPhoto.takenAt
+                })
+            });
 
-        if (!response.ok) {
-            const data = await response.json();
-            setError(data.error ?? 'Save failed');
-            return;
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                const message = data.error ?? data.details ?? 'Save failed';
+                setError(message);
+                setEditorStatus({ type: 'error', message });
+                return;
+            }
+
+            setSuccessMessage('Photo updated successfully.');
+            setEditorStatus({ type: 'success', message: 'Saved.' });
+
+            await loadPhotos().catch(() => {
+                setEditorStatus({
+                    type: 'success',
+                    message: 'Saved. List not refreshed!'
+                });
+            });
+        } catch (saveError) {
+            const message = saveError instanceof Error ? saveError.message : 'Save failed';
+            setError(message);
+            setEditorStatus({ type: 'error', message: `Error: ${message}` });
+        } finally {
+            setIsSaving(false);
         }
-
-        setSuccessMessage('Photo updated successfully.');
-        await loadPhotos();
     }
 
     async function saveSelectedPhotosLocation(location: {
@@ -695,30 +710,49 @@ export function HomePage({
 
         setError(null);
         setSuccessMessage(null);
+        setEditorStatus(null);
+        setIsSaving(true);
 
-        const updates = await Promise.all(
-            selectedPhotoIds.map((photoId) =>
-                fetch(`/api/photos/${photoId}`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(location)
-                })
-            )
-        );
+        try {
+            const updates = await Promise.all(
+                selectedPhotoIds.map((photoId) =>
+                    fetch(`/api/photos/${photoId}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(location)
+                    })
+                )
+            );
 
-        const failed = updates.find((response) => !response.ok);
-        if (failed) {
-            const data = await failed.json();
-            setError(data.error ?? 'Batch update failed');
-            return;
+            const failed = updates.find((response) => !response.ok);
+            if (failed) {
+                const data = await failed.json().catch(() => ({}));
+                const message = data.error ?? data.details ?? 'Batch update failed';
+                setError(message);
+                setEditorStatus({ type: 'error', message });
+                return;
+            }
+
+            const okMsg =
+                selectedPhotoIds.length > 1
+                    ? `Details saved on ${selectedPhotoIds.length} photos.`
+                    : 'Details saved.';
+            setSuccessMessage(okMsg);
+            setEditorStatus({ type: 'success', message: okMsg });
+
+            await loadPhotos().catch(() => {
+                setEditorStatus({
+                    type: 'success',
+                    message: `${okMsg} (update error.)`
+                });
+            });
+        } catch (batchError) {
+            const message = batchError instanceof Error ? batchError.message : 'Batch update failed';
+            setError(message);
+            setEditorStatus({ type: 'error', message: `Salvataggio non riuscito: ${message}` });
+        } finally {
+            setIsSaving(false);
         }
-
-        setSuccessMessage(
-            selectedPhotoIds.length > 1
-                ? `Location applied to ${selectedPhotoIds.length} photos.`
-                : 'Location applied to the selected photo.'
-        );
-        await loadPhotos();
     }
 
     async function deletePhoto(photoToDelete: PhotoRecord | null = selectedPhoto) {
@@ -854,16 +888,12 @@ export function HomePage({
                 });
             } else {
                 setSelectedPhotoIds((current) =>
-                    current.includes(photo.id)
-                        ? current.filter((id) => id !== photo.id)
-                        : [...current, photo.id]
+                    current.includes(photo.id) ? current.filter((id) => id !== photo.id) : [...current, photo.id]
                 );
             }
         } else if (event.metaKey || event.ctrlKey) {
             setSelectedPhotoIds((current) =>
-                current.includes(photo.id)
-                    ? current.filter((id) => id !== photo.id)
-                    : [...current, photo.id]
+                current.includes(photo.id) ? current.filter((id) => id !== photo.id) : [...current, photo.id]
             );
         } else {
             setSelectedPhotoIds([photo.id]);
@@ -890,12 +920,7 @@ export function HomePage({
         const active = photoListTab === tab;
 
         return (
-            <button
-                type="button"
-                className={active ? '' : 'secondary'}
-                onClick={() => setPhotoListTab(tab)}
-                style={tabButtonBaseStyle}
-            >
+            <button type="button" className={active ? '' : 'secondary'} onClick={() => setPhotoListTab(tab)} style={tabButtonBaseStyle}>
                 {getTabIcon(tab)}
                 <span>{label}</span>
                 <span
@@ -906,8 +931,8 @@ export function HomePage({
                         flexShrink: 0
                     }}
                 >
-          ({count})
-        </span>
+                    ({count})
+                </span>
             </button>
         );
     }
@@ -920,8 +945,6 @@ export function HomePage({
             <div className="stack">
                 <section className="card stack">
                     <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-
-
                         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
                             <button type="button" className="secondary" onClick={decreaseMapHeight} disabled={!isMapOpen || mapHeight <= minMapHeight} aria-label="Smaller map" title="Smaller map" style={mapIconButtonStyle}>
                                 <IconShrink />
@@ -955,8 +978,8 @@ export function HomePage({
                     <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         <h2 style={{ margin: 0 }}>Photos</h2>
                         <span className="small">
-              {totalPhotos} result(s) · page {currentPage} of {totalPages}
-            </span>
+                            {totalPhotos} result(s) · page {currentPage} of {totalPages}
+                        </span>
                     </div>
 
                     <div
@@ -980,17 +1003,10 @@ export function HomePage({
                             </div>
 
                             <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span className="small">
-                  Active tags: {selectedTags.length > 0 ? selectedTags.join(', ') : 'none'}
-                </span>
+                                <span className="small">Active tags: {selectedTags.length > 0 ? selectedTags.join(', ') : 'none'}</span>
 
                                 <span className="small">Selected: {selectedPhotosCount}</span>
-                                <button
-                                    type="button"
-                                    onClick={() => openEditor()}
-                                    disabled={!selectedPhoto}
-                                    style={tabButtonBaseStyle}
-                                >
+                                <button type="button" onClick={() => openEditor()} disabled={!selectedPhoto} style={tabButtonBaseStyle}>
                                     <IconEdit />
                                     <span>{isMultiSelection ? `Edit selected (${selectedPhotosCount})` : 'Edit selected'}</span>
                                 </button>
@@ -1017,20 +1033,11 @@ export function HomePage({
                                     City
                                     <input value={filters.city} onChange={(e) => setFilters((prev) => ({ ...prev, city: e.target.value }))} />
                                 </label>
-                                <button
-                                    type="button"
-                                    className="secondary"
-                                    onClick={() => setFilters(emptyFilters)}
-                                    aria-label="Reset filters"
-                                    title="Reset filters"
-                                    style={filterIconButtonStyle}
-                                >
+                                <button type="button" className="secondary" onClick={() => setFilters(emptyFilters)} aria-label="Reset filters" title="Reset filters" style={filterIconButtonStyle}>
                                     <IconReset />
                                 </button>
                             </div>
                         </div>
-
-
 
                         <div
                             className="row"
@@ -1050,9 +1057,9 @@ export function HomePage({
                                     minHeight: 36
                                 }}
                             >
-                <span className="small" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 36 }}>
-                  Showing {photos.length} of {totalPhotos} photo(s)
-                </span>
+                                <span className="small" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 36 }}>
+                                    Showing {photos.length} of {totalPhotos} photo(s)
+                                </span>
 
                                 <label
                                     className="small"
@@ -1064,11 +1071,7 @@ export function HomePage({
                                     }}
                                 >
                                     <span>Per page</span>
-                                    <select
-                                        value={pageSize}
-                                        onChange={(e) => setPageSize(Number(e.target.value))}
-                                        style={{ minWidth: 80, height: 36 }}
-                                    >
+                                    <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} style={{ minWidth: 80, height: 36 }}>
                                         {pageSizeOptions.map((option) => (
                                             <option key={option} value={option}>
                                                 {option}
@@ -1087,26 +1090,10 @@ export function HomePage({
                                     minHeight: 36
                                 }}
                             >
-                                <button
-                                    type="button"
-                                    className="secondary"
-                                    onClick={() => setCurrentPage(1)}
-                                    disabled={currentPage <= 1}
-                                    aria-label="First page"
-                                    title="First page"
-                                    style={filterIconButtonStyle}
-                                >
+                                <button type="button" className="secondary" onClick={() => setCurrentPage(1)} disabled={currentPage <= 1} aria-label="First page" title="First page" style={filterIconButtonStyle}>
                                     <IconChevronsLeft />
                                 </button>
-                                <button
-                                    type="button"
-                                    className="secondary"
-                                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                                    disabled={currentPage <= 1}
-                                    aria-label="Previous page"
-                                    title="Previous page"
-                                    style={filterIconButtonStyle}
-                                >
+                                <button type="button" className="secondary" onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={currentPage <= 1} aria-label="Previous page" title="Previous page" style={filterIconButtonStyle}>
                                     <IconChevronLeft />
                                 </button>
                                 <span
@@ -1118,28 +1105,12 @@ export function HomePage({
                                         whiteSpace: 'nowrap'
                                     }}
                                 >
-                  Page {currentPage} / {totalPages}
-                </span>
-                                <button
-                                    type="button"
-                                    className="secondary"
-                                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-                                    disabled={currentPage >= totalPages}
-                                    aria-label="Next page"
-                                    title="Next page"
-                                    style={filterIconButtonStyle}
-                                >
+                                    Page {currentPage} / {totalPages}
+                                </span>
+                                <button type="button" className="secondary" onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))} disabled={currentPage >= totalPages} aria-label="Next page" title="Next page" style={filterIconButtonStyle}>
                                     <IconChevronRight />
                                 </button>
-                                <button
-                                    type="button"
-                                    className="secondary"
-                                    onClick={() => setCurrentPage(totalPages)}
-                                    disabled={currentPage >= totalPages}
-                                    aria-label="Last page"
-                                    title="Last page"
-                                    style={filterIconButtonStyle}
-                                >
+                                <button type="button" className="secondary" onClick={() => setCurrentPage(totalPages)} disabled={currentPage >= totalPages} aria-label="Last page" title="Last page" style={filterIconButtonStyle}>
                                     <IconChevronsRight />
                                 </button>
                             </div>
@@ -1228,15 +1199,19 @@ export function HomePage({
                                             {photo.originalFilename}
                                         </strong>
                                         <span className="small">{photo.takenAt ? new Date(photo.takenAt).toLocaleString() : 'No date'}</span>
-                                        {'missingFromDisk' in photo && photo.missingFromDisk ? <span className="small" style={{ color: '#b42318' }}>Missing from disk</span> : null}
+                                        {'missingFromDisk' in photo && photo.missingFromDisk ? (
+                                            <span className="small" style={{ color: '#b42318' }}>
+                                                Missing from disk
+                                            </span>
+                                        ) : null}
                                         <span className="small">
-                      {photo.placeName || photo.country || photo.city
-                          ? [photo.placeName, photo.city, photo.country].filter(Boolean).join(' · ')
-                          : 'No location label'}
-                    </span>
+                                            {photo.placeName || photo.country || photo.city ? [photo.placeName, photo.city, photo.country].filter(Boolean).join(' · ') : 'No location label'}
+                                        </span>
                                         <div className="tag-list">
                                             {photo.tags.map(({ tag }) => (
-                                                <span key={tag.id} className="tag">{tag.name}</span>
+                                                <span key={tag.id} className="tag">
+                                                    {tag.name}
+                                                </span>
                                             ))}
                                         </div>
                                     </div>
@@ -1249,7 +1224,6 @@ export function HomePage({
 
             {isEditorOpen && selectedPhoto && (
                 <div
-                    onClick={closeEditor}
                     style={{
                         position: 'fixed',
                         inset: 0,
@@ -1291,25 +1265,11 @@ export function HomePage({
                                         </button>
                                     ) : null}
 
-                                    <button
-                                        type="button"
-                                        className="secondary"
-                                        onClick={openOriginalImage}
-                                        aria-label="Open original"
-                                        title="Open original"
-                                        style={modalIconButtonStyle}
-                                    >
+                                    <button type="button" className="secondary" onClick={openOriginalImage} aria-label="Open original" title="Open original" style={modalIconButtonStyle}>
                                         <IconExternal />
                                     </button>
 
-                                    <button
-                                        type="button"
-                                        className="secondary"
-                                        onClick={closeEditor}
-                                        aria-label="Close"
-                                        title="Close"
-                                        style={modalIconButtonStyle}
-                                    >
+                                    <button type="button" className="secondary" onClick={closeEditor} aria-label="Close" title="Close" disabled={isSaving} style={modalIconButtonStyle}>
                                         <IconClose />
                                     </button>
                                 </div>
@@ -1348,6 +1308,23 @@ export function HomePage({
 
                             <div className="small">{selectedPhoto.originalFilename}</div>
                             {isMultiSelection && <div className="small">Multi-selection active. Changes to location apply to all selected photos.</div>}
+
+                            {editorStatus ? (
+                                <div
+                                    className="small"
+                                    role={editorStatus.type === 'error' ? 'alert' : 'status'}
+                                    aria-live="polite"
+                                    style={{
+                                        padding: '8px 10px',
+                                        borderRadius: 8,
+                                        border: editorStatus.type === 'error' ? '1px solid #fecdca' : '1px solid #abefc6',
+                                        background: editorStatus.type === 'error' ? '#fef3f2' : '#ecfdf3',
+                                        color: editorStatus.type === 'error' ? '#b42318' : '#027a48'
+                                    }}
+                                >
+                                    {editorStatus.message}
+                                </div>
+                            ) : null}
 
                             {!isMultiSelection && hasSuggestions(suggestions) ? (
                                 <div className="card stack" style={{ gap: 12, padding: 12, background: '#ecfdf3', border: '1px solid #abefc6' }}>
@@ -1449,7 +1426,9 @@ export function HomePage({
                                                     <strong>Tags</strong>
                                                     <div className="tag-list">
                                                         {suggestions.tags.map((tag) => (
-                                                            <span key={tag} className="tag">{tag}</span>
+                                                            <span key={tag} className="tag">
+                                                                {tag}
+                                                            </span>
                                                         ))}
                                                     </div>
                                                 </div>
@@ -1467,17 +1446,11 @@ export function HomePage({
                                 </div>
                             ) : null}
 
-                            {!isMultiSelection && suggestions && !hasSuggestions(suggestions) && !isAnalyzingPhoto ? (
-                                <div className="small">No missing fields could be suggested for this photo.</div>
-                            ) : null}
+                            {!isMultiSelection && suggestions && !hasSuggestions(suggestions) && !isAnalyzingPhoto ? <div className="small">No missing fields could be suggested for this photo.</div> : null}
 
                             <label>
                                 Caption
-                                <textarea
-                                    value={selectedPhoto.caption ?? ''}
-                                    onChange={(e) => setSelectedPhoto({ ...selectedPhoto, caption: e.target.value })}
-                                    disabled={isMultiSelection}
-                                />
+                                <textarea value={selectedPhoto.caption ?? ''} onChange={(e) => setSelectedPhoto({ ...selectedPhoto, caption: e.target.value })} disabled={isMultiSelection} />
                             </label>
 
                             <label>
@@ -1531,10 +1504,7 @@ export function HomePage({
                             <div className="row" style={{ alignItems: 'flex-start' }}>
                                 <label>
                                     Country
-                                    <input
-                                        value={selectedPhoto.country ?? ''}
-                                        onChange={(e) => setSelectedPhoto({ ...selectedPhoto, country: e.target.value })}
-                                    />
+                                    <input value={selectedPhoto.country ?? ''} onChange={(e) => setSelectedPhoto({ ...selectedPhoto, country: e.target.value })} />
                                 </label>
 
                                 <label style={{ width: '100%' }}>
@@ -1560,10 +1530,7 @@ export function HomePage({
                             <div className="row">
                                 <label style={{ width: '100%' }}>
                                     City
-                                    <input
-                                        value={selectedPhoto.city ?? ''}
-                                        onChange={(e) => setSelectedPhoto({ ...selectedPhoto, city: e.target.value })}
-                                    />
+                                    <input value={selectedPhoto.city ?? ''} onChange={(e) => setSelectedPhoto({ ...selectedPhoto, city: e.target.value })} />
                                 </label>
                             </div>
 
@@ -1574,7 +1541,9 @@ export function HomePage({
                                     aria-label={isMultiSelection ? `Apply location to ${selectedPhotosCount} photos` : 'Save changes'}
                                     title={isMultiSelection ? `Apply location to ${selectedPhotosCount} photos` : 'Save changes'}
                                     style={modalIconButtonStyle}
+                                    disabled={isSaving}
                                     onClick={() => {
+                                        if (isSaving) return;
                                         if (isMultiSelection) {
                                             void saveSelectedPhotosLocation({
                                                 city: selectedPhoto.city ?? null,
@@ -1592,15 +1561,7 @@ export function HomePage({
                                     <IconSave />
                                 </button>
 
-                                <button
-                                    type="button"
-                                    className="danger"
-                                    aria-label="Delete photo"
-                                    title="Delete photo"
-                                    onClick={() => void deletePhoto()}
-                                    disabled={isMultiSelection}
-                                    style={modalDangerIconButtonStyle}
-                                >
+                                <button type="button" className="danger" aria-label="Delete photo" title="Delete photo" onClick={() => void deletePhoto()} disabled={isMultiSelection || isSaving} style={modalDangerIconButtonStyle}>
                                     <IconTrash />
                                 </button>
                             </div>
@@ -1610,28 +1571,16 @@ export function HomePage({
                                 <div className="tag-list">
                                     {selectedPhoto.tags.map(({ tag }) => (
                                         <span key={tag.id} className="tag">
-                      {tag.name}
+                                            {tag.name}
                                             <button type="button" className="danger small-button" onClick={() => void removeTag(tag.name)}>
-                        x
-                      </button>
-                    </span>
+                                                x
+                                            </button>
+                                        </span>
                                     ))}
                                 </div>
                                 <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                                    <input
-                                        value={tagName}
-                                        onChange={(e) => setTagName(e.target.value)}
-                                        placeholder="e.g. panorama"
-                                    />
-                                    <button
-                                        type="button"
-                                        className="secondary"
-                                        onClick={() => void addTag()}
-                                        disabled={isMultiSelection}
-                                        aria-label="Add tag"
-                                        title="Add tag"
-                                        style={modalIconButtonStyle}
-                                    >
+                                    <input value={tagName} onChange={(e) => setTagName(e.target.value)} placeholder="e.g. panorama" />
+                                    <button type="button" className="secondary" onClick={() => void addTag()} disabled={isMultiSelection} aria-label="Add tag" title="Add tag" style={modalIconButtonStyle}>
                                         <IconPlus />
                                     </button>
                                 </div>
